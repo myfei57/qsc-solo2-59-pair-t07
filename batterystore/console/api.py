@@ -67,6 +67,7 @@ class Api:
         add("GET", "/api/soc", lambda params, body: self._platform.soc_snapshot())
         add("GET", "/api/balance", lambda params, body: self._platform.balance_snapshot())
         add("GET", "/api/quota", lambda params, body: self._platform.quota_snapshot())
+        add("GET", "/api/joint", lambda params, body: self._platform.joint_snapshot())
         add("GET", "/api/audit", self._audit)
         add("GET", "/api/audit/report", lambda params, body: self._platform.audit.report())
         add("GET", "/api/audit/operations", self._operations)
@@ -100,6 +101,11 @@ class Api:
         add("POST", "/api/disturb", self._disturb)
         add("POST", "/api/probe/pcs", self._probe_pcs)
         add("POST", "/api/probe/fault", self._probe_fault)
+        add("POST", "/api/joint/sample", self._joint_sample)
+        add("POST", "/api/joint/observe", self._joint_observe)
+        add("POST", "/api/joint/adjust", self._joint_adjust)
+        add("POST", "/api/joint/compare", self._joint_compare)
+        add("POST", "/api/joint/drill", self._joint_drill)
 
     def routes(self) -> list[dict]:
         """返回接口清单，供自检与文档核对。"""
@@ -261,3 +267,27 @@ class Api:
 
     def _probe_fault(self, params: dict, body: dict) -> dict:
         return self._platform.concurrency_fault_probe(rounds=_as_int(body, "rounds", 16))
+
+    def _joint_sample(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_sample(
+            rack_id=body.get("rack_id"),
+            resistance_mohm=_as_float(body, "resistance_mohm", 1.2),
+            temp_rise_c=_as_float(body, "temp_rise_c", 4.5),
+            current_a=_as_float(body, "current_a", 140.0),
+        )
+
+    def _joint_observe(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_begin_observation(rack_id=body.get("rack_id"))
+
+    def _joint_adjust(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_adjust(rack_id=body.get("rack_id"), power_kw=_as_float(body, "power_kw", 0.0))
+
+    def _joint_compare(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_compare(rack_id=body.get("rack_id"))
+
+    def _joint_drill(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_drill(
+            rack_id=body.get("rack_id"),
+            windows=_as_int(body, "windows", 56),
+            seed=_as_int(body, "seed", 7),
+        )

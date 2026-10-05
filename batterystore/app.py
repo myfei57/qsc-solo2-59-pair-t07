@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import random
 import threading
 
 from .audit.log import AuditLog
@@ -21,6 +22,7 @@ from .eventbus import Event, EventBus
 from .fire.fire import FireLinkage
 from .grid.grid import GridTie
 from .ids import IdFactory
+from .joint.warden import JointWarden
 from .ns.capacity import CapacityPlan, plan_capacity
 from .ns.registry import NamespaceRegistry
 from .ns.topology import Topology, build_default_topology
@@ -107,6 +109,12 @@ class Platform:
         self.balancer = Balancer(self.config.balance)
         self.quota = QuotaLedger(self.config.quota)
 
+        self._joint_journal = JsonlJournal(store.root, "joint", segment_limit=512)
+        self.joint = JointWarden(self.config.joint, self._joint_journal)
+        per_rack_kw = self.config.pcs.max_power_kw / len(self.racks)
+        for rack_id in self.racks:
+            self.joint.register(rack_id, per_rack_kw, per_rack_kw * self.config.joint.initial_load_ratio)
+
         self._cycles = 0
         self._operations = 0
         self._faults_reported = 0
@@ -131,6 +139,7 @@ class Platform:
             ("station", "balance", "cell-balancer"),
             ("station", "quota", "quota-ledger"),
             ("station", "audit", "run-audit"),
+            ("station", "joint", "joint-health"),
         ):
             self.namespaces.register(area, device, kind)
         for rack_id, rack in self.racks.items():
@@ -148,6 +157,10 @@ class Platform:
             self._operations = int(state.get("operations", 0))
             self._cycles = int(state.get("cycles", 0))
             self._drills = int(state.get("drills", 0))
+        for problem in self.joint.restore_dossiers(self._joint_journal.read_all()):
+            self.bus.publish(
+                Event.of("joint", "joint", "dossier_integrity", station=self.station, severity="alarm", message=problem)
+            )
 
     def _persist(self) -> None:
         """落盘平台计数，供重启后对照。"""
@@ -483,6 +496,142 @@ class Platform:
             self.bus.publish(Event.of("bms", "bms", "fault_clear", station=self.station, severity="notice", rack_id=key))
             return {"rack_id": key, "cleared": cleared}
 
+    def _publish_joint_actions(self, report: dict) -> dict:
+        """把连接点值守动作逐条发布到事件总线（审计据此留痕）。"""
+
+        for action in report.get("actions", []):
+            payload = {key: value for key, value in action.items() if key not in ("action", "severity")}
+            self.bus.publish(
+                Event.of("joint", "joint", action["action"], station=self.station, severity=action.get("severity", "notice"), **payload)
+            )
+        return report
+
+    def joint_sample(
+        self,
+        rack_id: str | None = None,
+        resistance_mohm: float = 1.2,
+        temp_rise_c: float = 4.5,
+        current_a: float = 140.0,
+    ) -> dict:
+        """接入一条连接点采样；确认劣化时自动停用该簇并无缺口转移负载。"""
+
+        with self._lock:
+            rack = self._rack(rack_id)
+            report = self.joint.ingest_sample(rack.rack_id, resistance_mohm, temp_rise_c, current_a)
+            return self._publish_joint_actions(report)
+
+    def joint_begin_observation(self, rack_id: str | None = None) -> dict:
+        """维修完成后进入复投观察期（限功率复归，观察档案开卷）。"""
+
+        with self._lock:
+            rack = self._rack(rack_id)
+            report = self.joint.begin_observation(rack.rack_id)
+            return self._publish_joint_actions(report)
+
+    def joint_adjust(self, rack_id: str | None = None, power_kw: float = 0.0) -> dict:
+        """调度回读：同步某簇实际出力；裕度释放后自动完成滞留的卸载。"""
+
+        with self._lock:
+            rack = self._rack(rack_id)
+            report = self.joint.adjust_allocation(rack.rack_id, power_kw)
+            return self._publish_joint_actions(report)
+
+    def joint_compare(self, rack_id: str | None = None) -> dict:
+        """两种判定口径对照（本站停用判决只采用相对位次口径）。"""
+
+        with self._lock:
+            return self.joint.compare(self._rack(rack_id).rack_id)
+
+    def joint_drill(self, rack_id: str | None = None, windows: int = 56, seed: int = 7) -> dict:
+        """连接点演练：合成长期走势，完整跑一遍劣化→停用→转移→维修→观察→复投。
+
+        与消防演练同理，这里注入的是合成采样而不是真实量测。演练后段叠加一次
+        全群寒潮，用来核对相对位次口径在环境温度整体漂移时不会误停健康簇，
+        并与固定幅度口径对照——两种口径此时结论相反，正是选型依据。
+        """
+
+        with self._lock:
+            limits = self.joint.limits
+            rack_ids = sorted(self.racks)
+            if len(rack_ids) < limits.min_peers + 1:
+                return {
+                    "ok": False,
+                    "ran": False,
+                    "violations": ["insufficient_peers"],
+                    "racks": len(rack_ids),
+                    "needed": limits.min_peers + 1,
+                }
+            target = self._rack(rack_id or rack_ids[1]).rack_id
+            rng = random.Random(seed)
+            base_r = {rid: 1.20 + rng.uniform(-0.03, 0.03) for rid in rack_ids}
+            degrade_from = limits.trend_windows + 1
+            cold_from = max(degrade_from, windows - 12)
+            repaired = False
+            repair_countdown = 2
+            actions: list[dict] = []
+            timeline: list[dict] = []
+            min_total_ratio = 1.0
+            false_confirms = 0
+            for window in range(windows):
+                cold = 0.0 if window < cold_from else min(1.0, (window - cold_from + 1) / 3.0)
+                env = 1.0 + 0.15 * cold
+                for rid in rack_ids:
+                    degradation = 1.0
+                    if rid == target and not repaired and window >= degrade_from:
+                        degradation = 1.012 ** (window - degrade_from)
+                    for _ in range(limits.window_samples):
+                        resistance = base_r[rid] * env * degradation * (1.0 + rng.gauss(0.0, 0.004))
+                        temp_rise = 3.75 * base_r[rid] * env * degradation + rng.gauss(0.0, 0.12)
+                        report = self.joint_sample(rid, resistance, temp_rise, limits.rated_current_a)
+                        for action in report["actions"]:
+                            actions.append({"window": window, **action})
+                            if action["action"] == "load_transfer":
+                                min_total_ratio = min(min_total_ratio, action["min_total_ratio"])
+                            if action["action"] == "degradation_confirmed" and action["rack_id"] != target:
+                                false_confirms += 1
+                state = self.joint.state_of(target)
+                if not timeline or timeline[-1]["state"] != state:
+                    timeline.append({"window": window, "state": state})
+                if state == "out_of_service" and not repaired:
+                    repair_countdown -= 1
+                    if repair_countdown <= 0:
+                        repaired = True
+                        observe = self.joint_begin_observation(target)
+                        for action in observe["actions"]:
+                            actions.append({"window": window, **action})
+            healthy = next(rid for rid in rack_ids if rid != target)
+            compare = self.joint_compare(healthy)
+            dossier = self.joint.dossier_of(target) or {}
+            confirmed = any(a["action"] == "degradation_confirmed" and a["rack_id"] == target for a in actions)
+            recommissioned = any(a["action"] == "recommissioned" and a["rack_id"] == target for a in actions)
+            ok = (
+                confirmed
+                and recommissioned
+                and dossier.get("verdict") == "pass"
+                and dossier.get("integrity") is True
+                and false_confirms == 0
+                and min_total_ratio >= 1.0 - 1e-6
+                and compare["diverged"] is True
+            )
+            return {
+                "ok": ok,
+                "ran": True,
+                "target": target,
+                "windows": windows,
+                "timeline": timeline,
+                "actions": actions,
+                "transfers": sum(1 for a in actions if a["action"] == "load_transfer"),
+                "min_total_ratio": round(min_total_ratio, 6),
+                "false_confirms": false_confirms,
+                "compare": compare,
+                "dossier": dossier,
+            }
+
+    def joint_snapshot(self) -> dict:
+        """返回连接点值守快照。"""
+
+        return self.joint.snapshot().as_dict()
+
     def fire_drill(
         self,
         zone: str = DEFAULT_ZONE,
@@ -767,6 +916,7 @@ class Platform:
             "grid": self.grid_snapshot(),
             "soc": self.soc_snapshot(),
             "balance": self.balance_snapshot(),
+            "joint": self.joint_snapshot(),
         }
 
     def snapshot(self) -> dict:
@@ -804,5 +954,6 @@ def build_platform(
             soc=resolved.soc,
             balance=resolved.balance,
             quota=resolved.quota,
+            joint=resolved.joint,
         )
     return Platform(config=resolved, clock=clock, rack_count=rack_count)

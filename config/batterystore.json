@@ -78,6 +78,27 @@
       "discharge_quota_kwh": 2000.0,
       "tariff_peak": 1.2,
       "tariff_valley": 0.4
+    },
+    "joint": {
+      "window_samples": 6,
+      "level_windows": 5,
+      "trend_windows": 14,
+      "persistence_windows": 5,
+      "z_threshold": 3.0,
+      "resistance_floor_mohm": 0.02,
+      "temp_rise_floor_c": 0.3,
+      "resistance_slope_frac": 0.001,
+      "temp_rise_slope_c": 0.02,
+      "rated_current_a": 140.0,
+      "min_current_ratio": 0.3,
+      "transfer_step_kw": 30.0,
+      "observation_windows": 10,
+      "observation_z_limit": 2.5,
+      "observation_power_ratio": 0.5,
+      "min_peers": 3,
+      "initial_load_ratio": 0.6,
+      "fixed_rise_resistance_frac": 0.1,
+      "fixed_rise_temp_c": 0.5
     }
   }
 }

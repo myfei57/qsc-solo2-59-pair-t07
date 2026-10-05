@@ -16,6 +16,7 @@ STAGES = (
     ("grid", "tie-point limit", ("pcs", "temp")),
     ("fire", "suppression linkage", ("bms", "pcs")),
     ("audit", "operation trail", ("bms", "pcs", "fire")),
+    ("joint", "connection-health watch", ("bms", "pcs")),
 )
 
 

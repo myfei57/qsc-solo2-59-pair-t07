@@ -336,6 +336,71 @@ class QuotaLimits:
 
 
 @dataclass(frozen=True)
+class JointLimits:
+    """连接点健康：相对位次判定、无缺口负载转移与复投观察参数。
+
+    观察期 z 上限（observation_z_limit）要严于劣化判定阈值，但不能贴着群体
+    MAD 的下限设：同型簇存在天然的制造分散性，健康簇可能长期坐在群体中位
+    数 1~2 个稳健σ之外，上限定得太低会让这样的簇永远过不了观察期。
+    """
+
+    window_samples: int
+    level_windows: int
+    trend_windows: int
+    persistence_windows: int
+    z_threshold: float
+    resistance_floor_mohm: float
+    temp_rise_floor_c: float
+    resistance_slope_frac: float
+    temp_rise_slope_c: float
+    rated_current_a: float
+    min_current_ratio: float
+    transfer_step_kw: float
+    observation_windows: int
+    observation_z_limit: float
+    observation_power_ratio: float
+    min_peers: int
+    initial_load_ratio: float
+    fixed_rise_resistance_frac: float
+    fixed_rise_temp_c: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "JointLimits":
+        limits = cls(
+            window_samples=_integer(section, "window_samples", minimum=1),
+            level_windows=_integer(section, "level_windows", minimum=1),
+            trend_windows=_integer(section, "trend_windows", minimum=2),
+            persistence_windows=_integer(section, "persistence_windows", minimum=1),
+            z_threshold=_number(section, "z_threshold", minimum=0.1),
+            resistance_floor_mohm=_number(section, "resistance_floor_mohm", minimum=0.0),
+            temp_rise_floor_c=_number(section, "temp_rise_floor_c", minimum=0.0),
+            resistance_slope_frac=_number(section, "resistance_slope_frac", minimum=0.0),
+            temp_rise_slope_c=_number(section, "temp_rise_slope_c", minimum=0.0),
+            rated_current_a=_number(section, "rated_current_a", minimum=1.0),
+            min_current_ratio=_number(section, "min_current_ratio", minimum=0.0),
+            transfer_step_kw=_number(section, "transfer_step_kw", minimum=0.1),
+            observation_windows=_integer(section, "observation_windows", minimum=1),
+            observation_z_limit=_number(section, "observation_z_limit", minimum=0.1),
+            observation_power_ratio=_number(section, "observation_power_ratio", minimum=0.0),
+            min_peers=_integer(section, "min_peers", minimum=2),
+            initial_load_ratio=_number(section, "initial_load_ratio", minimum=0.0),
+            fixed_rise_resistance_frac=_number(section, "fixed_rise_resistance_frac", minimum=0.0),
+            fixed_rise_temp_c=_number(section, "fixed_rise_temp_c", minimum=0.0),
+        )
+        if limits.observation_z_limit >= limits.z_threshold:
+            raise ConfigError("观察期 z 上限必须严于劣化判定阈值", component="config")
+        if limits.observation_power_ratio > 1.0:
+            raise ConfigError("观察期功率比例不能大于 1", component="config")
+        if not 0.0 < limits.initial_load_ratio <= 1.0:
+            raise ConfigError("初始负载率必须在 0 到 1 之间", component="config")
+        if limits.min_current_ratio >= 1.0:
+            raise ConfigError("温升统计的最小电流比例必须小于 1", component="config")
+        if limits.persistence_windows > limits.trend_windows:
+            raise ConfigError("确认窗口数不能多于趋势窗口数", component="config")
+        return limits
+
+
+@dataclass(frozen=True)
 class StationConfig:
     """一份完整的电站配置。"""
 
@@ -350,6 +415,7 @@ class StationConfig:
     soc: SocLimits
     balance: BalanceLimits
     quota: QuotaLimits
+    joint: JointLimits
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "StationConfig":
@@ -373,6 +439,7 @@ class StationConfig:
             soc=SocLimits.from_mapping(_section(limits, "soc")),
             balance=BalanceLimits.from_mapping(_section(limits, "balance")),
             quota=QuotaLimits.from_mapping(_section(limits, "quota")),
+            joint=JointLimits.from_mapping(_section(limits, "joint")),
         )
 
 
@@ -403,6 +470,7 @@ def default_config() -> StationConfig:
         soc=SocLimits(280.0, 0.98, 7200.0, 3.0, 50.0),
         balance=BalanceLimits(25.0, 4.0, 2.0, 600.0, 2),
         quota=QuotaLimits(24.0, 2000.0, 2000.0, 1.2, 0.4),
+        joint=JointLimits(6, 5, 14, 5, 3.0, 0.02, 0.3, 0.001, 0.02, 140.0, 0.3, 30.0, 10, 2.5, 0.5, 3, 0.6, 0.10, 0.5),
     )
 
 
@@ -486,6 +554,27 @@ def config_to_mapping(cfg: StationConfig) -> dict:
                 "discharge_quota_kwh": cfg.quota.discharge_quota_kwh,
                 "tariff_peak": cfg.quota.tariff_peak,
                 "tariff_valley": cfg.quota.tariff_valley,
+            },
+            "joint": {
+                "window_samples": cfg.joint.window_samples,
+                "level_windows": cfg.joint.level_windows,
+                "trend_windows": cfg.joint.trend_windows,
+                "persistence_windows": cfg.joint.persistence_windows,
+                "z_threshold": cfg.joint.z_threshold,
+                "resistance_floor_mohm": cfg.joint.resistance_floor_mohm,
+                "temp_rise_floor_c": cfg.joint.temp_rise_floor_c,
+                "resistance_slope_frac": cfg.joint.resistance_slope_frac,
+                "temp_rise_slope_c": cfg.joint.temp_rise_slope_c,
+                "rated_current_a": cfg.joint.rated_current_a,
+                "min_current_ratio": cfg.joint.min_current_ratio,
+                "transfer_step_kw": cfg.joint.transfer_step_kw,
+                "observation_windows": cfg.joint.observation_windows,
+                "observation_z_limit": cfg.joint.observation_z_limit,
+                "observation_power_ratio": cfg.joint.observation_power_ratio,
+                "min_peers": cfg.joint.min_peers,
+                "initial_load_ratio": cfg.joint.initial_load_ratio,
+                "fixed_rise_resistance_frac": cfg.joint.fixed_rise_resistance_frac,
+                "fixed_rise_temp_c": cfg.joint.fixed_rise_temp_c,
             },
         },
     }

@@ -94,6 +94,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     calibration = platform.calibrate_soc(68.0, "demo")
     probe = platform.concurrency_probe(rounds=args.rounds)
     fault_probe = platform.concurrency_fault_probe(rounds=8)
+    joint = platform.joint_drill()
     alarms = platform.alerts()
     shutdown = platform.stop()
 
@@ -117,6 +118,15 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "calibration": calibration,
         "concurrency": probe,
         "concurrency_fault": fault_probe,
+        "joint": {
+            "ran": joint["ran"],
+            "ok": joint["ok"],
+            "target": joint.get("target"),
+            "transfers": joint.get("transfers"),
+            "min_total_ratio": joint.get("min_total_ratio"),
+            "verdict": (joint.get("dossier") or {}).get("verdict"),
+            "diverged": (joint.get("compare") or {}).get("diverged"),
+        },
         "alerts": alarms,
         "shutdown": shutdown,
         "probe": endpoints,
@@ -133,6 +143,8 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         failures.append("concurrency_probe")
     if not fault_probe["ok"]:
         failures.append("fault_probe")
+    if joint.get("ran") and not joint.get("ok"):
+        failures.append("joint_drill")
     if not all(item["present"] for item in pages):
         failures.append("pages_missing")
     if failures:
