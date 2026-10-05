@@ -336,6 +336,64 @@ class QuotaLimits:
 
 
 @dataclass(frozen=True)
+class JointLimits:
+    """连接点劣化判定、无缺口转移与复投观察参数。"""
+
+    min_current_a: float
+    rated_current_a: float
+    steady_band_ratio: float
+    r_max_mohm: float
+    dt_min_c: float
+    dt_max_c: float
+    min_samples_day: int
+    z_watch: float
+    z_on: float
+    z_strong: float
+    z_ok: float
+    z_slope_max: float
+    window_days: int
+    persist_days: int
+    min_group: int
+    observation_days: int
+    transfer_margin_ratio: float
+    reentry_power_kw: float
+    ramp_step_kw: float
+    protect_t_conn_c: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "JointLimits":
+        limits = cls(
+            min_current_a=_number(section, "min_current_a", minimum=0.1),
+            rated_current_a=_number(section, "rated_current_a", minimum=1.0),
+            steady_band_ratio=_number(section, "steady_band_ratio", minimum=0.0),
+            r_max_mohm=_number(section, "r_max_mohm", minimum=0.1),
+            dt_min_c=_number(section, "dt_min_c"),
+            dt_max_c=_number(section, "dt_max_c"),
+            min_samples_day=_integer(section, "min_samples_day", minimum=1),
+            z_watch=_number(section, "z_watch", minimum=0.0),
+            z_on=_number(section, "z_on", minimum=0.0),
+            z_strong=_number(section, "z_strong", minimum=0.0),
+            z_ok=_number(section, "z_ok", minimum=0.0),
+            z_slope_max=_number(section, "z_slope_max", minimum=0.0),
+            window_days=_integer(section, "window_days", minimum=1),
+            persist_days=_integer(section, "persist_days", minimum=1),
+            min_group=_integer(section, "min_group", minimum=3),
+            observation_days=_integer(section, "observation_days", minimum=1),
+            transfer_margin_ratio=_number(section, "transfer_margin_ratio", minimum=0.0),
+            reentry_power_kw=_number(section, "reentry_power_kw", minimum=0.1),
+            ramp_step_kw=_number(section, "ramp_step_kw", minimum=0.1),
+            protect_t_conn_c=_number(section, "protect_t_conn_c"),
+        )
+        if limits.dt_min_c >= limits.dt_max_c:
+            raise ConfigError("温升合理性下限必须小于上限", component="config")
+        if not limits.z_ok < limits.z_watch <= limits.z_on < limits.z_strong:
+            raise ConfigError("判定阈值必须满足 z_ok < z_watch ≤ z_on < z_strong", component="config")
+        if limits.persist_days > limits.window_days:
+            raise ConfigError("持续天数不能大于统计窗口", component="config")
+        return limits
+
+
+@dataclass(frozen=True)
 class StationConfig:
     """一份完整的电站配置。"""
 
@@ -350,6 +408,7 @@ class StationConfig:
     soc: SocLimits
     balance: BalanceLimits
     quota: QuotaLimits
+    joint: JointLimits
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "StationConfig":
@@ -373,6 +432,7 @@ class StationConfig:
             soc=SocLimits.from_mapping(_section(limits, "soc")),
             balance=BalanceLimits.from_mapping(_section(limits, "balance")),
             quota=QuotaLimits.from_mapping(_section(limits, "quota")),
+            joint=JointLimits.from_mapping(_section(limits, "joint")),
         )
 
 
@@ -403,6 +463,12 @@ def default_config() -> StationConfig:
         soc=SocLimits(280.0, 0.98, 7200.0, 3.0, 50.0),
         balance=BalanceLimits(25.0, 4.0, 2.0, 600.0, 2),
         quota=QuotaLimits(24.0, 2000.0, 2000.0, 1.2, 0.4),
+        joint=JointLimits(
+            50.0, 200.0, 0.02, 20.0, -5.0, 80.0, 20,
+            2.5, 3.5, 5.0, 2.0, 0.1,
+            10, 7, 4, 7,
+            0.05, 100.0, 50.0, 105.0,
+        ),
     )
 
 
@@ -486,6 +552,28 @@ def config_to_mapping(cfg: StationConfig) -> dict:
                 "discharge_quota_kwh": cfg.quota.discharge_quota_kwh,
                 "tariff_peak": cfg.quota.tariff_peak,
                 "tariff_valley": cfg.quota.tariff_valley,
+            },
+            "joint": {
+                "min_current_a": cfg.joint.min_current_a,
+                "rated_current_a": cfg.joint.rated_current_a,
+                "steady_band_ratio": cfg.joint.steady_band_ratio,
+                "r_max_mohm": cfg.joint.r_max_mohm,
+                "dt_min_c": cfg.joint.dt_min_c,
+                "dt_max_c": cfg.joint.dt_max_c,
+                "min_samples_day": cfg.joint.min_samples_day,
+                "z_watch": cfg.joint.z_watch,
+                "z_on": cfg.joint.z_on,
+                "z_strong": cfg.joint.z_strong,
+                "z_ok": cfg.joint.z_ok,
+                "z_slope_max": cfg.joint.z_slope_max,
+                "window_days": cfg.joint.window_days,
+                "persist_days": cfg.joint.persist_days,
+                "min_group": cfg.joint.min_group,
+                "observation_days": cfg.joint.observation_days,
+                "transfer_margin_ratio": cfg.joint.transfer_margin_ratio,
+                "reentry_power_kw": cfg.joint.reentry_power_kw,
+                "ramp_step_kw": cfg.joint.ramp_step_kw,
+                "protect_t_conn_c": cfg.joint.protect_t_conn_c,
             },
         },
     }

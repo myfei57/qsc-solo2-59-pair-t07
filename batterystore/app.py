@@ -21,6 +21,8 @@ from .eventbus import Event, EventBus
 from .fire.fire import FireLinkage
 from .grid.grid import GridTie
 from .ids import IdFactory
+from .joint.ledger import JointLedger
+from .joint.monitor import JointHealthMonitor
 from .ns.capacity import CapacityPlan, plan_capacity
 from .ns.registry import NamespaceRegistry
 from .ns.topology import Topology, build_default_topology
@@ -106,6 +108,15 @@ class Platform:
         self.soc = SocEstimator(self.config.soc, self.bms.calibration)
         self.balancer = Balancer(self.config.balance)
         self.quota = QuotaLedger(self.config.quota)
+        self.joint = JointHealthMonitor(
+            self.config.joint,
+            JointLedger(JsonlJournal(store.root, "joint", segment_limit=512)),
+            self.clock,
+            self.bus,
+            station,
+        )
+        for rack_id in self.racks:
+            self.joint.register_rack(rack_id, type_id="standard", capability_kw=self.config.pcs.max_power_kw)
 
         self._cycles = 0
         self._operations = 0
@@ -130,6 +141,7 @@ class Platform:
             ("station", "soc", "state-of-charge"),
             ("station", "balance", "cell-balancer"),
             ("station", "quota", "quota-ledger"),
+            ("station", "joint", "joint-health"),
             ("station", "audit", "run-audit"),
         ):
             self.namespaces.register(area, device, kind)
@@ -525,6 +537,55 @@ class Platform:
         with self._lock:
             return self.grid.monitor_frequency(frequency_hz, self.clock.now())
 
+    def joint_dispatch(self, total_kw: float = 1000.0) -> dict:
+        """设定全站出力，并在在运簇间按能力分摊（连接点组件的协调视图）。"""
+
+        with self._lock:
+            report = self.joint.dispatch(total_kw)
+            self._operations += 1
+            self._persist()
+            return report
+
+    def joint_review(self, telemetry: dict[str, list[dict]], day: str | None = None) -> dict:
+        """跑一天的连接点健康评估：特征 → 相对位次判定 → 必要的停用转移。"""
+
+        with self._lock:
+            review_day = day or self.clock.utc_iso()[:10]
+            report = self.joint.review(review_day, telemetry)
+            self._operations += 1
+            self._persist()
+            return report
+
+    def joint_repair_done(self, rack_id: str | None = None, day: str | None = None) -> dict:
+        """连接点处理完成：限功率并入并进入观察期。"""
+
+        with self._lock:
+            rack = self._rack(rack_id)
+            report = self.joint.repair_done(rack.rack_id, day or self.clock.utc_iso()[:10])
+            self._operations += 1
+            self._persist()
+            return report
+
+    def joint_close_observation(self, rack_id: str | None = None, day: str | None = None) -> dict:
+        """观察期满：依据台账里冻结的观察记录决定复投或退回。"""
+
+        with self._lock:
+            rack = self._rack(rack_id)
+            report = self.joint.close_observation(rack.rack_id, day or self.clock.utc_iso()[:10])
+            self._operations += 1
+            self._persist()
+            return report
+
+    def joint_snapshot(self) -> dict:
+        """返回连接点健康快照。"""
+
+        return self.joint.snapshot().as_dict()
+
+    def joint_ledger(self) -> dict:
+        """返回连接点台账校验结果与最近记录。"""
+
+        return self.joint.ledger_report()
+
     def set_soc(self, rack_id: str | None = None, soc_pct: float = 50.0) -> dict:
         """直接写入某簇 SOC（现场标定用）。"""
 
@@ -767,6 +828,7 @@ class Platform:
             "grid": self.grid_snapshot(),
             "soc": self.soc_snapshot(),
             "balance": self.balance_snapshot(),
+            "joint": self.joint_snapshot(),
         }
 
     def snapshot(self) -> dict:
@@ -804,5 +866,6 @@ def build_platform(
             soc=resolved.soc,
             balance=resolved.balance,
             quota=resolved.quota,
+            joint=resolved.joint,
         )
     return Platform(config=resolved, clock=clock, rack_count=rack_count)

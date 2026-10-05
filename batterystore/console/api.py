@@ -67,6 +67,8 @@ class Api:
         add("GET", "/api/soc", lambda params, body: self._platform.soc_snapshot())
         add("GET", "/api/balance", lambda params, body: self._platform.balance_snapshot())
         add("GET", "/api/quota", lambda params, body: self._platform.quota_snapshot())
+        add("GET", "/api/joint", lambda params, body: self._platform.joint_snapshot())
+        add("GET", "/api/joint/ledger", lambda params, body: self._platform.joint_ledger())
         add("GET", "/api/audit", self._audit)
         add("GET", "/api/audit/report", lambda params, body: self._platform.audit.report())
         add("GET", "/api/audit/operations", self._operations)
@@ -100,6 +102,10 @@ class Api:
         add("POST", "/api/disturb", self._disturb)
         add("POST", "/api/probe/pcs", self._probe_pcs)
         add("POST", "/api/probe/fault", self._probe_fault)
+        add("POST", "/api/joint/dispatch", self._joint_dispatch)
+        add("POST", "/api/joint/review", self._joint_review)
+        add("POST", "/api/joint/repair-done", self._joint_repair_done)
+        add("POST", "/api/joint/close-observation", self._joint_close_observation)
 
     def routes(self) -> list[dict]:
         """返回接口清单，供自检与文档核对。"""
@@ -261,3 +267,19 @@ class Api:
 
     def _probe_fault(self, params: dict, body: dict) -> dict:
         return self._platform.concurrency_fault_probe(rounds=_as_int(body, "rounds", 16))
+
+    def _joint_dispatch(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_dispatch(total_kw=_as_float(body, "total_kw", 1000.0))
+
+    def _joint_review(self, params: dict, body: dict) -> dict:
+        telemetry = body.get("telemetry")
+        if not isinstance(telemetry, dict):
+            raise StoreError("请求体必须包含 telemetry 映射", component="console")
+        day = body.get("day")
+        return self._platform.joint_review(telemetry, day=str(day) if day else None)
+
+    def _joint_repair_done(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_repair_done(rack_id=body.get("rack_id"))
+
+    def _joint_close_observation(self, params: dict, body: dict) -> dict:
+        return self._platform.joint_close_observation(rack_id=body.get("rack_id"))

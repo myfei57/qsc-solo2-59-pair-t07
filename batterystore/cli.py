@@ -94,6 +94,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     calibration = platform.calibrate_soc(68.0, "demo")
     probe = platform.concurrency_probe(rounds=args.rounds)
     fault_probe = platform.concurrency_fault_probe(rounds=8)
+    joint = _demo_joint(config, clock, getattr(args, "storage_root", None))
     alarms = platform.alerts()
     shutdown = platform.stop()
 
@@ -117,6 +118,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "calibration": calibration,
         "concurrency": probe,
         "concurrency_fault": fault_probe,
+        "joint": joint,
         "alerts": alarms,
         "shutdown": shutdown,
         "probe": endpoints,
@@ -133,6 +135,8 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         failures.append("concurrency_probe")
     if not fault_probe["ok"]:
         failures.append("fault_probe")
+    if not joint["ok"]:
+        failures.append("joint")
     if not all(item["present"] for item in pages):
         failures.append("pages_missing")
     if failures:
@@ -169,6 +173,87 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     platform = _build(args)
     _dump(platform.reset_state())
     return 0
+
+
+def _joint_telemetry(rack_id: str, r_mohm: float, k_norm: float, samples: int = 24) -> list[dict]:
+    """按目标电阻与温升系数反演一天的遥测样本（演示用确定性波动）。"""
+
+    rows: list[dict] = []
+    for index in range(samples):
+        current_a = 120.0 + ((index * 7) % 5) - 2.0
+        drop_v = r_mohm / 1000.0 * current_a
+        noise_v = (((index * 13) % 7) - 3) * 0.002
+        rows.append(
+            {
+                "ts": float(index * 600),
+                "current_a": current_a,
+                "v_terminal_v": 800.0 + drop_v + noise_v,
+                "v_bus_v": 800.0,
+                "t_conn_c": 25.0 + k_norm * (current_a / 1000.0) ** 2 + (((index * 11) % 5) - 2) * 0.1,
+                "t_amb_c": 25.0,
+            }
+        )
+    return rows
+
+
+def _demo_joint(config, clock, storage_root: str | None) -> dict:
+    """连接点劣化全流程演示：四簇同型，rk-04 逐步劣化 → 停用 → 处理 → 观察 → 复投。
+
+    相对位次判定需要至少 min_group 台同型簇，演示使用独立的四簇平台，
+    与主演示平台的计数互不影响。
+    """
+
+    root = f"{storage_root or config.storage_root}-joint"
+    platform = build_platform(config, clock=clock, storage_root=root, rack_count=4)
+    platform.start()
+    dispatch = platform.joint_dispatch(total_kw=1000.0)
+    rack_ids = sorted(platform.racks)
+    healthy = {rack_id: (1.0 + 0.03 * pos, 800.0 + 8.0 * pos) for pos, rack_id in enumerate(rack_ids)}
+
+    reviews: list[dict] = []
+    isolated: dict = {}
+    for day_index in range(1, 20):
+        day = f"2026-09-{day_index:02d}"
+        telemetry = {}
+        for rack_id, (r_mohm, k_norm) in healthy.items():
+            degrading = rack_id == "rk-04" and day_index >= 8
+            telemetry[rack_id] = _joint_telemetry(
+                rack_id, 1.45 if degrading else r_mohm, 1160.0 if degrading else k_norm
+            )
+        report = platform.joint_review(telemetry, day=day)
+        reviews.append({"day": day, "verdicts": report["verdicts"], "states": report["states"]})
+        transferred = [item for item in report["transfers"] if item.get("isolated")]
+        if transferred:
+            isolated = transferred[-1]
+            break
+
+    repair = platform.joint_repair_done(rack_id="rk-04", day="2026-09-20")
+    for day_index in range(20, 27):
+        day = f"2026-09-{day_index:02d}"
+        telemetry = {rack_id: _joint_telemetry(rack_id, r, k) for rack_id, (r, k) in healthy.items()}
+        platform.joint_review(telemetry, day=day)
+    close = platform.joint_close_observation(rack_id="rk-04", day="2026-09-27")
+    ledger = platform.joint_ledger()
+    snapshot = platform.joint_snapshot()
+    allocation = snapshot["allocation_kw"]
+    ok = (
+        bool(isolated)
+        and close["decision"] == "reinstated"
+        and snapshot["states"].get("rk-04") == "in_service"
+        and ledger["verify"]["ok"]
+        and abs(sum(allocation.values()) - 1000.0) <= 1.0
+    )
+    platform.stop()
+    return {
+        "ok": ok,
+        "dispatch_total_kw": dispatch["total_kw"],
+        "reviews": reviews[-3:],
+        "isolated": isolated,
+        "repair": repair,
+        "close": close,
+        "ledger": ledger,
+        "allocation_kw": allocation,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
